@@ -1,46 +1,43 @@
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "sdk"))
-
-from agentlens import trace, client
 import time
+import random
+from sdk.agentlens import AgentLensClient
 
-# Simulation of a shared state object used in LangGraph/CrewAI
-app_state = {
-    "query": "Future of Robotics",
-    "research_notes": [],
-    "critique": None,
-    "final_report": None
-}
-
-@trace(name="Web Search", type="tool", state_key="state")
-def search_step(state: dict):
-    print("--- Searching for information ---")
-    state["research_notes"].append("Found: Boston Dynamics is leading bipeds.")
-    state["research_notes"].append("Found: Tesla Optimus is scaling fast.")
-    time.sleep(0.5)
-    return "Search completed"
-
-@trace(name="Writer Agent", type="agent", state_key="state")
-def write_step(state: dict):
-    print("--- Writing summary ---")
-    notes = " ".join(state["research_notes"])
-    state["final_report"] = f"Robotics Report: {notes}"
-    time.sleep(0.5)
-    return "Report written"
-
-@trace(name="Robotics Multi-Agent Workflow", type="workflow", state_key="state")
-def run_workflow(state: dict):
-    client.create_trace(name="Robotics Research Run", metadata={"version": "1.0"})
+def run_multi_agent_simulation():
+    client = AgentLensClient(project_id="demo-project")
     
-    search_step(state=state)
-    write_step(state=state)
+    # 1. Start Main Research Trace
+    trace_id = client.create_trace(name="Deep Research: Quantum Computing")
     
-    return "Workflow complete"
+    with client.create_span(name="Planner Agent", state_before={"task": "Research Quantum Computing"}) as planner:
+        time.sleep(1)
+        plan = ["Search for recent papers", "Summarize findings", "Generate report"]
+        planner.end_span(state_after={"plan": plan, "status": "done"})
+        
+        # 2. Search Phase (Child Spans)
+        with client.create_span(name="Browser Agent", parent_id=planner.span_id, state_before={"search_queries": plan[0]}) as browser:
+            time.sleep(0.5)
+            
+            # Tool call inside browser
+            with client.create_span(name="Google Search Tool", parent_id=browser.span_id, state_before={"query": "Quantum computing advances 2024"}) as search:
+                time.sleep(1.5)
+                results = ["Paper A: Error Mitigation", "Paper B: Topological Qubits"]
+                search.end_span(state_after={"results": results})
+            
+            browser.end_span(state_after={"found_sources": len(results)})
+            
+        # 3. Summarization Phase
+        with client.create_span(name="Writer Agent", parent_id=planner.span_id, state_before={"sources": results}) as writer:
+            time.sleep(1)
+            
+            # Sub-task: LLM Call
+            with client.create_span(name="GPT-4 Summarizer", parent_id=writer.span_id, state_before={"text": "..."}) as gpt:
+                time.sleep(2)
+                gpt.end_span(state_after={"summary": "Quantum computing is evolving rapidly with a focus on error correction."})
+                
+            writer.end_span(state_after={"document": "Final summary generated."})
+
+    print(f"Simulation complete! Trace ID: {trace_id}")
+    print("Check your dashboard at http://localhost:3000")
 
 if __name__ == "__main__":
-    print("Starting multi-agent workflow...")
-    run_workflow(state=app_state)
-    client.flush()
-    print("\nWorkflow finished! State was successfully tracked across steps.")
-    print(f"Final State: {app_state}")
+    run_multi_agent_simulation()

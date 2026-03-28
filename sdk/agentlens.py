@@ -12,8 +12,9 @@ _current_trace_id: ContextVar[Optional[str]] = ContextVar("_current_trace_id", d
 _current_span_id: ContextVar[Optional[str]] = ContextVar("_current_span_id", default=None)
 
 class AgentLensClient:
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:8000", project_id: str = "default"):
         self.base_url = base_url
+        self.project_id = project_id
         self.active_threads = []
 
     def _send_ingest_request(self, endpoint: str, data: Dict[str, Any]):
@@ -22,7 +23,8 @@ class AgentLensClient:
             try:
                 requests.post(f"{self.base_url}/ingest/{endpoint}", json=data, timeout=5)
             except Exception as e:
-                print(f"AgentLens Ingestion Error: {e}")
+                # Silently fail for now to not break the agent's logic
+                pass
         
         t = threading.Thread(target=run)
         self.active_threads.append(t)
@@ -35,14 +37,14 @@ class AgentLensClient:
                 t.join()
         self.active_threads = []
 
-    def create_trace(self, name: str, project_id: str = "default", metadata: Dict[str, Any] = {}) -> str:
+    def create_trace(self, name: str, project_id: Optional[str] = None, metadata: Dict[str, Any] = {}) -> str:
         trace_id = str(uuid.uuid4())
         _current_trace_id.set(trace_id)
         
         data = {
             "trace_id": trace_id,
             "name": name,
-            "project_id": project_id,
+            "project_id": project_id or self.project_id,
             "start_time": datetime.utcnow().isoformat(),
             "metadata": metadata
         }
@@ -52,7 +54,7 @@ class AgentLensClient:
     def create_span(self, name: str, type: str = "agent", parent_id: Optional[str] = None, 
                     input: Optional[Dict[str, Any]] = None, 
                     metadata: Dict[str, Any] = {},
-                    state_before: Optional[Dict[str, Any]] = None) -> str:
+                    state_before: Optional[Dict[str, Any]] = None):
         
         trace_id = _current_trace_id.get()
         if not trace_id:
@@ -73,20 +75,41 @@ class AgentLensClient:
             "state_before": state_before
         }
         self._send_ingest_request("span", data)
-        return span_id
+        
+        # Return a context manager
+        return SpanContext(self, span_id, trace_id)
 
-    def end_span(self, span_id: str, output: Optional[Dict[str, Any]] = None, 
+    def end_span(self, span_id: str, trace_id: str, output: Optional[Dict[str, Any]] = None, 
                  error: Optional[str] = None, state_after: Optional[Dict[str, Any]] = None):
         data = {
             "span_id": span_id,
-            "trace_id": _current_trace_id.get(),
+            "trace_id": trace_id,
             "end_time": datetime.utcnow().isoformat(),
             "output": output,
             "error": error,
             "state_after": state_after
         }
-        # In this simple MVP, we just send a "patch" or a full span again
         self._send_ingest_request("span", data)
+
+class SpanContext:
+    def __init__(self, client: AgentLensClient, span_id: str, trace_id: str):
+        self.client = client
+        self.span_id = span_id
+        self.trace_id = trace_id
+        self._token = None
+
+    def __enter__(self):
+        self._token = _current_span_id.set(self.span_id)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        error = str(exc_val) if exc_val else None
+        self.end_span(error=error)
+        _current_span_id.reset(self._token)
+
+    def end_span(self, output: Optional[Dict[str, Any]] = None, 
+                 error: Optional[str] = None, state_after: Optional[Dict[str, Any]] = None):
+        self.client.end_span(self.span_id, self.trace_id, output, error, state_after)
 
 # Global client
 client = AgentLensClient()

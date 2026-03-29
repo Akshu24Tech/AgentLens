@@ -12,7 +12,7 @@ _current_trace_id: ContextVar[Optional[str]] = ContextVar("_current_trace_id", d
 _current_span_id: ContextVar[Optional[str]] = ContextVar("_current_span_id", default=None)
 
 class AgentLensClient:
-    def __init__(self, base_url: str = "http://localhost:8000", project_id: str = "default"):
+    def __init__(self, base_url: str = "http://localhost:8001", project_id: str = "default"):
         self.base_url = base_url
         self.project_id = project_id
         self.active_threads = []
@@ -37,24 +37,34 @@ class AgentLensClient:
                 t.join()
         self.active_threads = []
 
-    def create_trace(self, name: str, project_id: Optional[str] = None, metadata: Dict[str, Any] = {}) -> str:
+    def create_trace(self, name: str, project_id: Optional[str] = None, metadata: Dict[str, Any] = {}, tags: List[str] = []) -> str:
         trace_id = str(uuid.uuid4())
         _current_trace_id.set(trace_id)
         
+        # Merge tags into metadata for server-side compatibility or send explicitly if supported
+        full_metadata = metadata.copy()
+        if tags:
+            full_metadata["tags"] = tags
+
         data = {
             "trace_id": trace_id,
             "name": name,
             "project_id": project_id or self.project_id,
             "start_time": datetime.utcnow().isoformat(),
-            "metadata": metadata
+            "metadata": full_metadata
         }
         self._send_ingest_request("trace", data)
         return trace_id
 
+    def trace(self, name: str, project_id: Optional[str] = None, metadata: Dict[str, Any] = {}, tags: List[str] = []):
+        trace_id = self.create_trace(name, project_id, metadata, tags)
+        return TraceContext(self, trace_id)
+
     def create_span(self, name: str, type: str = "agent", parent_id: Optional[str] = None, 
                     input: Optional[Dict[str, Any]] = None, 
                     metadata: Dict[str, Any] = {},
-                    state_before: Optional[Dict[str, Any]] = None):
+                    state_before: Optional[Dict[str, Any]] = None,
+                    tags: List[str] = []):
         
         trace_id = _current_trace_id.get()
         if not trace_id:
@@ -72,7 +82,8 @@ class AgentLensClient:
             "start_time": datetime.utcnow().isoformat(),
             "input": input,
             "metadata": metadata,
-            "state_before": state_before
+            "state_before": state_before,
+            "tags": tags
         }
         self._send_ingest_request("span", data)
         

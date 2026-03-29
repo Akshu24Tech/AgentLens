@@ -1,218 +1,225 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { getTraces, getTraceDetail, Trace, Span } from '@/lib/api';
-import TrajectoryGraph from '@/components/TrajectoryGraph';
-import { Activity, Clock, Layers, Box, ChevronRight, Search, LayoutGrid } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Sidebar } from '@/components/Sidebar';
+import { TrajectoryGraph } from '@/components/TrajectoryGraph';
+import { MetadataInspector } from '@/components/MetadataInspector';
+import { ProjectDashboard } from '@/components/ProjectDashboard';
+import { SearchFilter, SearchFilters } from '@/components/SearchFilter';
+import { api, getWebSocket, getTags, searchTraces, Trace, Span } from '@/lib/api';
+import { 
+  LayoutDashboard, 
+  Layers, 
+  Settings, 
+  PlusCircle, 
+  ChevronRight,
+  Database,
+  Globe,
+  MoreVertical,
+  Activity,
+  Binary,
+  BarChart3,
+  AlertCircle
+} from 'lucide-react';
 
-export default function Dashboard() {
-  const [traces, setTraces] = useState<Trace[]>([]);
+export default function Home() {
+  const [selectedProjectId, setSelectedProjectId] = useState<string>('demo-project');
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [projectMetrics, setProjectMetrics] = useState<any>(null);
+  const [traces, setTraces] = useState<Trace[]>([]);
   const [traceDetail, setTraceDetail] = useState<{ trace: Trace; spans: Span[] } | null>(null);
-  const [selectedSpan, setSelectedSpan] = useState<Span | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [searchParams, setSearchParams] = useState<SearchFilters>({ query: '', status: 'all', tag: 'all' });
 
-  useEffect(() => {
-    refreshTraces();
-    const interval = setInterval(refreshTraces, 5000);
-    return () => clearInterval(interval);
+  const fetchProjectData = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const metricsRes = await api.get(`/projects/${selectedProjectId}`);
+      setProjectMetrics(metricsRes.data.metrics);
+
+      // Unified search/fetch
+      const results = await searchTraces({
+        project_id: selectedProjectId,
+        q: searchParams.query,
+        tag: searchParams.tag === 'all' ? undefined : searchParams.tag,
+        status: searchParams.status === 'all' ? undefined : searchParams.status
+      });
+      
+      setTraces(results);
+      
+      const tags = await getTags();
+      setAvailableTags(tags);
+      
+      setIsLoading(false);
+    } catch (err) {
+      console.error('Failed to fetch project data:', err);
+      setIsLoading(false);
+    }
+  }, [selectedProjectId, searchParams]);
+
+  const fetchTraceDetail = useCallback(async (traceId: string) => {
+    try {
+      const res = await api.get(`/traces/${traceId}`);
+      setTraceDetail(res.data);
+    } catch (err) {
+      console.error('Failed to fetch trace detail:', err);
+    }
   }, []);
 
   useEffect(() => {
-    if (selectedTraceId) {
-      loadTraceDetail(selectedTraceId);
-    }
-  }, [selectedTraceId]);
-
-  const refreshTraces = async () => {
-    try {
-      const data = await getTraces();
-      setTraces(data.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime()));
-      setLoading(false);
-    } catch (err) {
-      console.error("Failed to fetch traces", err);
-    }
-  };
-
-  const loadTraceDetail = async (id: string) => {
-    try {
-      const detail = await getTraceDetail(id);
-      setTraceDetail(detail);
-      if (detail.spans.length > 0) {
-        setSelectedSpan(detail.spans[0]);
+    fetchProjectData();
+    
+    // Set up WebSocket for real-time updates
+    const ws = getWebSocket(selectedProjectId);
+    
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'trace_created') {
+        setTraces(prev => [message.data, ...prev]);
+        setProjectMetrics((prev: any) => ({
+           ...prev,
+           total_traces: (prev?.total_traces || 0) + 1
+        }));
+      } else if (message.type === 'span_updated') {
+        // If we are looking at this specific trace, we should consider refreshing it
+        // Note: For extreme performance, we'd just update the specific span in state
+        // but for now, fetching trace detail is safer.
+        setProjectMetrics((prev: any) => ({
+           ...prev,
+           total_spans: (prev?.total_spans || 0) + 1
+        }));
       }
-    } catch (err) {
-      console.error("Failed to fetch trace detail", err);
+    };
+
+    return () => ws.close();
+  }, [selectedProjectId, fetchProjectData]);
+
+  // Separate effect to refresh trace detail when spans update
+  useEffect(() => {
+    if (selectedTraceId) {
+      fetchTraceDetail(selectedTraceId);
     }
-  };
+  }, [selectedTraceId, fetchTraceDetail]);
+
+  const selectedSpan = traceDetail?.spans.find(s => s.span_id === selectedSpanId) || null;
 
   return (
-    <div className="flex h-full w-full bg-zinc-950 text-zinc-100 overflow-hidden">
-      {/* Sidebar: Trace List */}
-      <aside className="w-80 border-r border-zinc-900 flex flex-col bg-zinc-950/50">
-        <div className="p-4 border-b border-zinc-900 flex items-center justify-between">
-          <h2 className="font-semibold flex items-center gap-2">
-            <Activity className="size-4 text-primary" />
-            Traces
-          </h2>
-          <span className="text-[10px] bg-zinc-900 px-2 py-0.5 rounded text-zinc-500 font-mono">
-            {traces.length}
-          </span>
+    <div className="flex h-screen bg-[#050508] text-gray-200 overflow-hidden font-sans selection:bg-indigo-500/30">
+      {/* 1. Project Navigation Strip (Fixed Left) */}
+      <div className="w-16 border-r border-white/5 bg-black/40 backdrop-blur-3xl flex flex-col items-center py-6 gap-6 z-50">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-4 group cursor-pointer hover:scale-105 transition-all">
+          <Database className="w-5 h-5 text-white" />
         </div>
         
-        <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-          {loading ? (
-            <div className="flex items-center justify-center h-20 text-zinc-600 text-sm italic">
-              Loading traces...
-            </div>
-          ) : traces.map((trace) => (
-            <button
-              key={trace.trace_id}
-              onClick={() => setSelectedTraceId(trace.trace_id)}
-              className={cn(
-                "w-full text-left p-3 rounded-lg transition-all group relative overflow-hidden",
-                selectedTraceId === trace.trace_id 
-                  ? "bg-primary/10 border border-primary/20 ring-1 ring-primary/10" 
-                  : "hover:bg-zinc-900 border border-transparent hover:border-zinc-800"
-              )}
-            >
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between">
-                  <span className={cn(
-                    "font-medium text-sm truncate",
-                    selectedTraceId === trace.trace_id ? "text-primary" : "text-zinc-200"
-                  )}>
-                    {trace.name}
-                  </span>
-                  <ChevronRight className={cn(
-                    "size-3 transition-transform",
-                    selectedTraceId === trace.trace_id ? "translate-x-0.5 opacity-100" : "opacity-0 group-hover:opacity-40"
-                  )} />
-                </div>
-                <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono italic">
-                  <span className="flex items-center gap-1">
-                    <Clock className="size-3" />
-                    {new Date(trace.start_time).toLocaleTimeString()}
-                  </span>
-                  <span className="px-1.5 py-0.5 bg-zinc-900 rounded border border-zinc-800 uppercase tracking-tighter">
-                    {trace.project_id}
-                  </span>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col relative">
-        {selectedTraceId && traceDetail ? (
-          <>
-            {/* Header info bar */}
-            <div className="h-12 border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md px-6 flex items-center justify-between z-10">
-              <div className="flex items-center gap-4">
-                <h3 className="text-sm font-medium text-zinc-300">
-                  Trace: <span className="text-white ml-1">{traceDetail.trace.name}</span>
-                </h3>
-                <div className="h-4 w-px bg-zinc-800" />
-                <div className="text-[11px] text-zinc-500 font-mono">
-                  ID: {traceDetail.trace.trace_id}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                 <button className="px-3 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md text-xs transition-colors flex items-center gap-2">
-                    <LayoutGrid className="size-3" />
-                    Focus View
-                 </button>
-              </div>
-            </div>
-
-            {/* Viewport for Graph */}
-            <div className="flex-1 relative bg-[radial-gradient(circle_at_center,_#111_0%,_#000_100%)]">
-              <TrajectoryGraph 
-                spans={traceDetail.spans} 
-                onSpanSelect={setSelectedSpan} 
-              />
-            </div>
-          </>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-zinc-600 gap-4 opacity-50">
-             <div className="size-16 bg-zinc-900 rounded-2xl flex items-center justify-center">
-                <Layers className="size-8" />
-             </div>
-             <p className="text-sm">Select a trace to visualize the agent's path</p>
+        <nav className="flex flex-col gap-4 flex-1">
+          <div className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer group relative">
+            <LayoutDashboard className="w-5 h-5 text-indigo-400" />
+            <div className="absolute left-14 bg-black/90 border border-white/10 px-2 py-1 rounded text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity z-50 pointer-events-none">Dashboard</div>
           </div>
-        )}
+          <div className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer group relative">
+            <Globe className="w-5 h-5 text-gray-400 group-hover:text-gray-200" />
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer group relative">
+            <Layers className="w-5 h-5 text-gray-400 group-hover:text-gray-200" />
+          </div>
+        </nav>
+
+        <div className="flex flex-col gap-4 mt-auto">
+          <div className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer">
+            <Settings className="w-5 h-5 text-gray-400" />
+          </div>
+          <div className="w-8 h-8 rounded-full border border-indigo-500/50 p-0.5 animate-pulse">
+            <div className="w-full h-full rounded-full bg-gradient-to-r from-indigo-500 to-blue-500"></div>
+          </div>
+        </div>
       </div>
 
-      {/* Right Sidebar: Span Detail/Metadata */}
-      <aside className={cn(
-        "w-96 border-l border-zinc-900 bg-zinc-950/50 flex flex-col transition-all",
-        !selectedSpan && "translate-x-full opacity-0 pointer-events-none"
-      )}>
-        {selectedSpan && (
-          <>
-            <div className="p-4 border-b border-zinc-900">
-              <h2 className="font-semibold flex items-center gap-2">
-                <Box className="size-4 text-primary" />
-                Span Detail
-              </h2>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
-              <section className="space-y-2">
-                <label className="text-[10px] uppercase font-bold text-zinc-600 tracking-wider">Name</label>
-                <div className="text-lg font-medium text-white">{selectedSpan.name}</div>
-                <div className="flex gap-2">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                    selectedSpan.status === 'success' ? "bg-green-500/10 text-green-500 border border-green-500/20" : "bg-red-500/10 text-red-500 border border-red-500/20"
-                  )}>
-                    {selectedSpan.status}
-                  </span>
-                </div>
-              </section>
+      {/* 2. Trace List Sidebar */}
+      <Sidebar 
+         traces={traces} 
+         selectedTraceId={selectedTraceId} 
+         onSelectTrace={(id) => {
+           setSelectedTraceId(id);
+           setSelectedSpanId(null);
+         }} 
+      />
 
-              <section className="space-y-4">
-                 <div className="p-4 bg-zinc-900/50 rounded-xl border border-zinc-800 space-y-3 shadow-inner">
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-zinc-500 font-mono">STATE BEFORE</label>
-                      <pre className="text-xs bg-black/40 p-3 rounded-lg border border-white/5 overflow-x-auto text-zinc-300">
-                        {JSON.stringify(selectedSpan.state_before || {}, null, 2)}
-                      </pre>
-                    </div>
-                    
-                    <div className="flex justify-center">
-                      <ChevronRight className="size-4 rotate-90 text-zinc-700" />
-                    </div>
+      {/* 3. Main Stage */}
+      <main className="flex-1 relative flex flex-col min-w-0">
+        <header className="h-16 border-b border-white/5 bg-black/20 backdrop-blur-xl flex items-center justify-between px-6 z-40">
+           <div className="flex items-center gap-2 text-sm">
+             <span className="text-gray-500 hover:text-gray-400 cursor-pointer" onClick={() => setSelectedTraceId(null)}>Projects</span>
+             <ChevronRight className="w-3 h-3 text-gray-600" />
+             <span className="text-indigo-400 font-medium">{selectedProjectId}</span>
+             {selectedTraceId && (
+               <>
+                 <ChevronRight className="w-3 h-3 text-gray-600" />
+                 <span className="text-gray-200 font-semibold truncate max-w-[200px]">
+                   {traces.find(t => t.trace_id === selectedTraceId)?.name || 'Untitled Trace'}
+                 </span>
+               </>
+             )}
+           </div>
 
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-zinc-500 font-mono">STATE AFTER</label>
-                      <pre className="text-xs bg-black/40 p-3 rounded-lg border border-white/5 overflow-x-auto text-zinc-100">
-                        {JSON.stringify(selectedSpan.state_after || {}, null, 2)}
-                      </pre>
-                    </div>
-                 </div>
-              </section>
+           <div className="flex items-center gap-3 flex-1 px-8 max-w-2xl">
+              <SearchFilter 
+                availableTags={availableTags} 
+                onSearch={setSearchParams} 
+              />
+           </div>
 
-              {selectedSpan.metadata && Object.keys(selectedSpan.metadata).length > 0 && (
-                <section className="space-y-2">
-                  <label className="text-[10px] uppercase font-bold text-zinc-600 tracking-wider">Metadata</label>
-                  <div className="grid gap-2">
-                    {Object.entries(selectedSpan.metadata).map(([key, val]) => (
-                      <div key={key} className="flex items-center justify-between text-xs p-2 rounded bg-zinc-900 border border-zinc-800/50">
-                        <span className="text-zinc-500">{key}</span>
-                        <span className="text-zinc-300 font-mono">{String(val)}</span>
-                      </div>
-                    ))}
+           <div className="flex items-center gap-3">
+             <button 
+               onClick={() => setSelectedTraceId(null)}
+               className="text-xs px-3 py-1.5 rounded-md bg-white/5 border border-white/10 hover:bg-white/10 transition-colors flex items-center gap-2"
+             >
+               <Layers className="w-3 h-3" /> All Projects
+             </button>
+             <button className="h-8 w-8 rounded-md bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/30 flex items-center justify-center transition-all shadow-lg shadow-indigo-500/10">
+               <PlusCircle className="w-4 h-4 text-white" />
+             </button>
+           </div>
+        </header>
+
+        <div className="flex-1 relative overflow-hidden flex">
+          {selectedTraceId ? (
+            <>
+              {/* Visualization Canvas */}
+              <div className="flex-1 relative">
+                {traceDetail ? (
+                  <TrajectoryGraph 
+                    spans={traceDetail.spans}
+                    selectedSpanId={selectedSpanId}
+                    onSelectSpan={setSelectedSpanId}
+                  />
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center flex-col gap-4">
+                    <div className="w-12 h-12 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+                    <span className="text-sm text-gray-500 italic">Synthesizing trajectory...</span>
                   </div>
-                </section>
-              )}
+                )}
+              </div>
+
+              {/* Inspector Panel */}
+              <MetadataInspector 
+                span={selectedSpan} 
+                onClose={() => setSelectedSpanId(null)} 
+              />
+            </>
+          ) : (
+            <div className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_50%_0%,_#1a1d2d_0%,_transparent_60%)]">
+               {projectMetrics && (
+                 <ProjectDashboard 
+                   projectName={selectedProjectId} 
+                   metrics={projectMetrics} 
+                 />
+               )}
             </div>
-          </>
-        )}
-      </aside>
+          )}
+        </div>
+      </main>
     </div>
   );
 }

@@ -1,13 +1,23 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:8001';
-const WS_BASE_URL = 'ws://localhost:8001';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws');
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
+  timeout: 10000,
 });
 
-export const getWebSocket = (project_id: string) => {
+// Response interceptor for consistent error handling
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    console.error('[AgentLens API]', err.message);
+    return Promise.reject(err);
+  }
+);
+
+export const getWebSocket = (project_id: string): WebSocket => {
   return new WebSocket(`${WS_BASE_URL}/ws/${project_id}`);
 };
 
@@ -20,12 +30,13 @@ export interface Span {
   start_time: string;
   end_time?: string;
   status: string;
-  state_before?: any;
-  state_after?: any;
-  input?: any;
-  output?: any;
-  metadata: Record<string, any>;
+  state_before?: Record<string, unknown>;
+  state_after?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  metadata: Record<string, unknown>;
   tags?: string[];
+  error?: string;
 }
 
 export interface Trace {
@@ -33,9 +44,32 @@ export interface Trace {
   name: string;
   project_id: string;
   start_time: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   tags?: string[];
 }
+
+export interface ProjectMetrics {
+  total_traces: number;
+  total_spans: number;
+  avg_duration: number;
+  failure_rate: number;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  description?: string;
+}
+
+export const getProjects = async (): Promise<Project[]> => {
+  const response = await api.get('/projects');
+  return response.data;
+};
+
+export const getProjectDetails = async (name: string): Promise<{ project: Project; metrics: ProjectMetrics }> => {
+  const response = await api.get(`/projects/${name}`);
+  return response.data;
+};
 
 export const getTraces = async (projectId?: string): Promise<Trace[]> => {
   const response = await api.get('/traces', { params: { project_id: projectId } });
@@ -47,7 +81,12 @@ export const getTraceDetail = async (traceId: string): Promise<{ trace: Trace; s
   return response.data;
 };
 
-export const searchTraces = async (params: { q?: string; project_id?: string; tag?: string; status?: string }): Promise<Trace[]> => {
+export const searchTraces = async (params: {
+  q?: string;
+  project_id?: string;
+  tag?: string;
+  status?: string;
+}): Promise<Trace[]> => {
   const response = await api.get('/search', { params });
   return response.data;
 };

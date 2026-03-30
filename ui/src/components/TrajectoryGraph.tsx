@@ -1,16 +1,18 @@
 'use client';
 
-import React, { useMemo, useEffect, useCallback } from 'react';
-import ReactFlow, { 
-  Background, 
-  Controls, 
+import React, { useMemo, useCallback } from 'react';
+import ReactFlow, {
+  Background,
+  Controls,
   MiniMap,
   useNodesState,
   useEdgesState,
   MarkerType,
   Node,
   Edge,
-  ConnectionLineType
+  ConnectionLineType,
+  useReactFlow,
+  ReactFlowProvider,
 } from 'reactflow';
 import dagre from 'dagre';
 import 'reactflow/dist/style.css';
@@ -23,98 +25,88 @@ interface TrajectoryGraphProps {
   onSelectSpan: (id: string | null) => void;
 }
 
-const nodeTypes = {
-  agent: AgentNode,
-  tool: ToolNode,
-  llm: LLMNode,
-};
+const nodeTypes = { agent: AgentNode, tool: ToolNode, llm: LLMNode };
 
-const dagreGraph = new dagre.graphlib.Graph();
-dagreGraph.setDefaultEdgeLabel(() => ({}));
+const NODE_W = 220;
+const NODE_H = 90;
 
-const nodeWidth = 220;
-const nodeHeight = 100;
+function getLayoutedElements(nodes: Node[], edges: Edge[]) {
+  const g = new dagre.graphlib.Graph();
+  g.setDefaultEdgeLabel(() => ({}));
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 });
 
-const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
-  const isHorizontal = direction === 'LR';
-  dagreGraph.setGraph({ rankdir: direction });
+  nodes.forEach(n => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
+  edges.forEach(e => g.setEdge(e.source, e.target));
+  dagre.layout(g);
 
-  nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
-  });
+  return {
+    nodes: nodes.map(n => {
+      const pos = g.node(n.id);
+      return { ...n, position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 } };
+    }),
+    edges,
+  };
+}
 
-  edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(dagreGraph);
-
-  const newNodes = nodes.map((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id);
-    node.targetPosition = isHorizontal ? 'left' as any : 'top' as any;
-    node.sourcePosition = isHorizontal ? 'right' as any : 'bottom' as any;
-
-    // We are shifting the dagre node position (which is center-based)
-    // to top left, so it matches the React Flow node anchor point
-    node.position = {
-      x: nodeWithPosition.x - nodeWidth / 2,
-      y: nodeWithPosition.y - nodeHeight / 2,
-    };
-
-    return node;
-  });
-
-  return { nodes: newNodes, edges };
-};
-
-const TrajectoryGraph = ({ spans, selectedSpanId, onSelectSpan }: TrajectoryGraphProps) => {
+function GraphInner({ spans, selectedSpanId, onSelectSpan }: TrajectoryGraphProps) {
+  const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  useEffect(() => {
-    if (!spans.length) return;
+  // Rebuild graph whenever spans or selection changes
+  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
+    if (!spans.length) return { nodes: [], edges: [] };
 
-    const initialNodes: Node[] = spans.map((span) => ({
+    const rawNodes: Node[] = spans.map(span => ({
       id: span.span_id,
       data: { label: span.name, span },
       position: { x: 0, y: 0 },
-      type: span.type as any || 'agent',
+      type: (['agent', 'tool', 'llm'].includes(span.type) ? span.type : 'agent') as string,
       selected: span.span_id === selectedSpanId,
-      style: {
-        border: span.span_id === selectedSpanId ? '2px solid #6366f1' : '1px solid transparent',
-        borderRadius: '8px',
-      }
     }));
 
-    const initialEdges: Edge[] = spans
-      .filter(span => span.parent_id)
-      .map(span => ({
-        id: `e-${span.parent_id}-${span.span_id}`,
-        source: span.parent_id!,
-        target: span.span_id,
+    const rawEdges: Edge[] = spans
+      .filter(s => s.parent_id)
+      .map(s => ({
+        id: `e-${s.parent_id}-${s.span_id}`,
+        source: s.parent_id!,
+        target: s.span_id,
         type: ConnectionLineType.SmoothStep,
-        animated: span.status === 'pending',
-        style: { 
-            stroke: span.status === 'failure' ? '#ef4444' : '#3f3f46',
-            strokeWidth: 2
+        animated: s.status === 'pending',
+        style: {
+          stroke: s.status === 'failure' ? '#ef4444' : '#3f3f46',
+          strokeWidth: 1.5,
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: span.status === 'failure' ? '#ef4444' : '#3f3f46',
+          color: s.status === 'failure' ? '#ef4444' : '#3f3f46',
+          width: 16,
+          height: 16,
         },
       }));
 
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-      initialNodes,
-      initialEdges
-    );
+    return getLayoutedElements(rawNodes, rawEdges);
+  }, [spans, selectedSpanId]);
 
-    setNodes([...layoutedNodes]);
-    setEdges([...layoutedEdges]);
-  }, [spans, setNodes, setEdges]);
+  // Sync into ReactFlow state
+  React.useEffect(() => {
+    setNodes(layoutedNodes);
+    setEdges(layoutedEdges);
+    // Fit view after layout settles
+    setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutedNodes, layoutedEdges]);
+
+  if (!spans.length) {
+    return (
+      <div className="w-full h-full flex items-center justify-center text-gray-600 italic text-sm">
+        No spans in this trace
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full h-full bg-zinc-950/20 backdrop-blur-sm">
+    <div className="w-full h-full">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -124,22 +116,32 @@ const TrajectoryGraph = ({ spans, selectedSpanId, onSelectSpan }: TrajectoryGrap
         onNodeClick={(_, node) => onSelectSpan(node.id)}
         onPaneClick={() => onSelectSpan(null)}
         fitView
+        fitViewOptions={{ padding: 0.15 }}
+        minZoom={0.2}
+        maxZoom={2}
         className="bg-zinc-950"
+        deleteKeyCode={null}
       >
-        <Background color="#111" gap={24} size={1} />
-        <Controls className="bg-zinc-900 border-zinc-800 fill-zinc-100" />
-        <MiniMap 
-            style={{ background: '#09090b', border: '1px solid #27272a' }}
-            maskColor="rgba(0, 0, 0, 0.7)"
-            nodeColor={(n) => {
-                if (n.type === 'agent') return '#3b82f6';
-                if (n.type === 'tool') return '#f97316';
-                return '#a855f7';
-            }}
+        <Background color="#1f1f23" gap={24} size={1} />
+        <Controls showInteractive={false} />
+        <MiniMap
+          style={{ background: '#09090b', border: '1px solid #27272a' }}
+          maskColor="rgba(0,0,0,0.7)"
+          nodeColor={n => {
+            if (n.type === 'agent') return '#3b82f6';
+            if (n.type === 'tool') return '#f97316';
+            return '#a855f7';
+          }}
         />
       </ReactFlow>
     </div>
   );
-};
+}
 
-export { TrajectoryGraph };
+export function TrajectoryGraph(props: TrajectoryGraphProps) {
+  return (
+    <ReactFlowProvider>
+      <GraphInner {...props} />
+    </ReactFlowProvider>
+  );
+}
